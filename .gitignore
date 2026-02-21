@@ -1,0 +1,18 @@
+# Unit Testing + Python
+tests/**/*.in
+tests/**/*.out
+
+__pycache__/
+.pytest_cache/
+.venv
+
+# IDE
+.vscode
+
+# C/C++
+*.o
+*.a
+*.out
+
+# Targets
+version/serial/src/docs
