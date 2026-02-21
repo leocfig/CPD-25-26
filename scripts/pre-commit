@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Use the following command to activate this hook
+# $ cp scripts/pre-commit .git/hooks/ && chmod +x .git/hooks/pre-commit
+
+EXTENSIONS="(\.cpp|\.c|\.hpp|\.h)$"
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E $EXTENSIONS)
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+echo "Applying clang-format..."
+
+for FILE in $STAGED_FILES; do
+    clang-format -i "$FILE"
+    git add "$FILE"
+    echo "Formatted: $FILE"
+done
+
+exit 0
