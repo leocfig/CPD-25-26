@@ -185,19 +185,6 @@ bool reassign_step(const double* __restrict__ docs_raw, const double* __restrict
         d3_B = _mm256_fmadd_pd(_mm256_sub_pd(doc_B, cent3), _mm256_sub_pd(doc_B, cent3), d3_B);
       }
 
-      // We are required to compute the Euclidean Distance, so we must apply sqrt
-      d0_A = _mm256_sqrt_pd(d0_A);
-      d0_B = _mm256_sqrt_pd(d0_B);
-
-      d1_A = _mm256_sqrt_pd(d1_A);
-      d1_B = _mm256_sqrt_pd(d1_B);
-
-      d2_A = _mm256_sqrt_pd(d2_A);
-      d2_B = _mm256_sqrt_pd(d2_B);
-
-      d3_A = _mm256_sqrt_pd(d3_A);
-      d3_B = _mm256_sqrt_pd(d3_B);
-
       // Efficient argmin with SIMD: https://en.algorithmica.org/hpc/algorithms/argmin/
 
       // We have 8 distances and must find the argmin.
@@ -260,9 +247,6 @@ bool reassign_step(const double* __restrict__ docs_raw, const double* __restrict
         d_A = _mm256_fmadd_pd(_mm256_sub_pd(doc_A, cent), _mm256_sub_pd(doc_A, cent), d_A);
         d_B = _mm256_fmadd_pd(_mm256_sub_pd(doc_B, cent), _mm256_sub_pd(doc_B, cent), d_B);
       }
-
-      d_A = _mm256_sqrt_pd(d_A);
-      d_B = _mm256_sqrt_pd(d_B);
 
       __m256d idx_c = _mm256_set1_pd(static_cast<double>(c));
 
