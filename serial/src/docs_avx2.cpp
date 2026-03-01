@@ -7,6 +7,7 @@
 #include <memory>
 
 // Hardcoded for working with 8 doubles -> 2 256-bit avx2 registers
+// Also useful since one block fills a unique cache line
 #define BLOCK_SIZE 8
 #define ALIGN 32
 
@@ -20,6 +21,7 @@ struct AlignedFree {
 template <typename T>
 using AlignedPtr = std::unique_ptr<T[], AlignedFree>;
 
+// Helper function to create a self-managed unique_ptr using aligned memory
 template <typename T>
 AlignedPtr<T> make_aligned(size_t size, size_t alignment = ALIGN) {
   if (alignment == 0 || (alignment & (alignment - 1))) {
@@ -36,11 +38,6 @@ AlignedPtr<T> make_aligned(size_t size, size_t alignment = ALIGN) {
   if (!ptr) throw std::bad_alloc();
 
   return AlignedPtr<T>(static_cast<T*>(ptr));
-}
-
-template <typename T>
-inline T assume_aligned(T ptr, size_t align = ALIGN) {
-  return static_cast<T>(__builtin_assume_aligned(ptr, align));
 }
 
 void parse_input(std::ifstream& in_stream, AlignedPtr<uint>& assigns, AlignedPtr<double>& docs,
@@ -88,13 +85,9 @@ inline void print_result(const uint* assigns, uint D) {
   std::cout << std::flush;
 }
 
-void update_step(const double* __restrict__ docs_raw, double* __restrict__ centroids_raw,
+void update_step(const double* __restrict__ docs, double* __restrict__ centroids,
                  double* __restrict__ accum_sums, uint* __restrict__ accum_counts,
-                 const uint* __restrict__ assigns_raw, uint C, uint D, uint S) {
-  const double* __restrict__ docs = assume_aligned<const double*>(docs_raw);
-  double* __restrict__ centroids = assume_aligned<double*>(centroids_raw);
-  const uint* __restrict__ assigns = assume_aligned<const uint*>(assigns_raw);
-
+                 const uint* __restrict__ assigns, uint C, uint D, uint S) {
   std::fill_n(accum_sums, (C + 1) * S, 0);
   std::fill_n(accum_counts, (C + 1), 0);
 
@@ -131,12 +124,8 @@ void update_step(const double* __restrict__ docs_raw, double* __restrict__ centr
   }
 }
 
-bool reassign_step(const double* __restrict__ docs_raw, const double* __restrict__ centroids_raw,
-                   uint* __restrict__ assigns_raw, uint C, uint D, uint D_padded, uint S) {
-  const double* __restrict__ docs = assume_aligned(docs_raw);
-  const double* __restrict__ centroids = assume_aligned(centroids_raw);
-  uint* __restrict__ assigns = assume_aligned(assigns_raw);
-
+bool reassign_step(const double* __restrict__ docs, const double* __restrict__ centroids,
+                   uint* __restrict__ assigns, uint C, uint D, uint D_padded, uint S) {
   uint changed_count = 0;
   const __m256d MAX_DOUBLE = _mm256_set1_pd(std::numeric_limits<double>::max());
 
@@ -186,6 +175,7 @@ bool reassign_step(const double* __restrict__ docs_raw, const double* __restrict
       }
 
       // Efficient argmin with SIMD: https://en.algorithmica.org/hpc/algorithms/argmin/
+      // Except we use blend instructions instead of testz
 
       // We have 8 distances and must find the argmin.
       // NOTE: This is much easier to do with AVX512 __mmask8. However Deucalion x86 nodes
@@ -341,9 +331,8 @@ int main(int argc, char** argv) {
 
   exec_time += omp_get_wtime();
 
-  print_result(assignments.get(), D);
-
   std::cerr << exec_time << "s" << '\n';
+  print_result(assignments.get(), D);
 
   // All allocated memory will be cleaned up by RAII
 
