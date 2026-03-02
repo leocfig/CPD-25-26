@@ -59,10 +59,6 @@ void parse_input(std::ifstream& in_stream, AlignedPtr<uint>& assigns, AlignedPtr
 
   std::fill_n(docs.get(), padded_doc_size * S, 0.0);
 
-  // Initialize clusters using round-robin manner
-  for (uint d = 0; d < D; d++) assigns[d] = d % C;
-  for (uint d = D; d < padded_doc_size; d++) assigns[d] = C;  // Ghost cluster
-
   uint doc_id;
 
   for (uint d = 0; d < D; d++) {
@@ -321,6 +317,11 @@ int main(int argc, char** argv) {
 
   double exec_time = -omp_get_wtime();
 
+  // Initialize clusters using round-robin manner
+  for (uint d = 0; d < D; d++) assignments[d] = d % C;
+  for (uint d = D; d < D_padded; d++) assignments[d] = C;  // Ghost cluster
+
+  // First centroid computation
   update_step(docs.get(), centroids.get(), accum_sums.get(), accum_counts.get(), assignments.get(),
               C, D, S);
 
