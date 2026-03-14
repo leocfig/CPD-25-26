@@ -9,7 +9,7 @@ def find_test_files():
     return list(base_path.rglob("*.in"))
 
 @pytest.mark.parametrize("input_file", find_test_files(), ids=lambda x: x.name)
-def test_cpp_app(input_file, pytestconfig):
+def test_docs(input_file, pytestconfig):
     # Get the binary path from the --target flag
     target_executable = pytestconfig.getoption("target")
     
