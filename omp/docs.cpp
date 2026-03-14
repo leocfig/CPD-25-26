@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <iomanip>
 
 // Hardcoded for working with 8 doubles -> 2 256-bit avx2 registers
 // Also useful since one block fills a unique cache line
@@ -82,15 +83,21 @@ inline void print_result(const uint* assigns, uint D) {
 }
 
 void update_step(const double* __restrict__ docs, double* __restrict__ centroids,
-                 double* __restrict__ accum_sums, uint* __restrict__ accum_counts,
-                 const uint* __restrict__ assigns, uint C, uint D, uint S) {
-  std::fill_n(accum_sums, (C + 1) * S, 0);
-  std::fill_n(accum_counts, (C + 1), 0);
+                 const uint* __restrict__ assigns, uint C, uint D, uint S,
+                 double* __restrict__ all_sums, uint* __restrict__ all_counts, int number_threads) {
 
+  int tid = omp_get_thread_num();
+  double* local_sums   = all_sums   + tid * (C + 1) * S;
+  uint*   local_counts = all_counts + tid * (C + 1);
+
+  std::fill_n(local_sums, (C + 1) * S, 0.0);
+  std::fill_n(local_counts, C + 1, 0);
+
+  #pragma omp for
   for (uint block_offset = 0; block_offset < D; block_offset += BLOCK_SIZE) {
     for (uint i = 0; i < BLOCK_SIZE; i++) {
       uint k = assigns[block_offset + i];
-      accum_counts[k]++;
+      local_counts[k]++;
     }
 
     size_t block_start_idx = (block_offset / BLOCK_SIZE) * (S * BLOCK_SIZE);
@@ -101,30 +108,34 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
       for (uint i = 0; i < BLOCK_SIZE; ++i) {
         double val = subj_weights[i];
         uint k = assigns[block_offset + i];
-
-        accum_sums[k * S + subj_idx] += val;
+        local_sums[k * S + subj_idx] += val;
       }
     }
   }
 
-  for (uint cluster_idx = 0; cluster_idx < C; cluster_idx++) {
-    double count = static_cast<double>(accum_counts[cluster_idx]);
-    double scale = (count >= 1) ? (1.0 / count) : 0.0;  // Avoid div by zero
-    uint cluster_start = cluster_idx * S;
+  // Reduce and compute centroids
+  #pragma omp for
+  for (uint k = 0; k < C; k++) {
+    uint count = 0;
+    for (int t = 0; t < number_threads; t++)
+      count += all_counts[t * (C + 1) + k];
 
-    for (uint subj_idx = 0; subj_idx < S; subj_idx++) {
-      double val = accum_sums[cluster_start + subj_idx] * scale;
+    double scale = (count >= 1) ? (1.0 / count) : 0.0;
 
-      centroids[cluster_start + subj_idx] = val;
+    for (uint s = 0; s < S; s++) {
+      double sum = 0.0;
+      for (int t = 0; t < number_threads; t++)
+        sum += all_sums[t * (C + 1) * S + k * S + s];
+      centroids[k * S + s] = sum * scale;
     }
   }
 }
 
-bool reassign_step(const double* __restrict__ docs, const double* __restrict__ centroids,
-                   uint* __restrict__ assigns, uint C, uint D, uint D_padded, uint S) {
-  uint changed_count = 0;
+void reassign_step(const double* __restrict__ docs, const double* __restrict__ centroids,
+                   uint* __restrict__ assigns, uint C, uint D, uint D_padded, uint S, uint& changed_count) {
   const __m256d MAX_DOUBLE = _mm256_set1_pd(std::numeric_limits<double>::max());
 
+  #pragma omp for reduction(|:changed_count)
   for (uint block_idx = 0; block_idx < D_padded; block_idx += BLOCK_SIZE) {
     size_t block_start = (block_idx / BLOCK_SIZE) * (S * BLOCK_SIZE);
 
@@ -280,8 +291,6 @@ bool reassign_step(const double* __restrict__ docs, const double* __restrict__ c
       _mm256_maskstore_epi32(reinterpret_cast<int*>(&assigns[block_idx]), store_mask, new_idx_256);
     }
   }
-
-  return (changed_count != 0) ? true : false;
 }
 
 int main(int argc, char** argv) {
@@ -311,28 +320,43 @@ int main(int argc, char** argv) {
 
   uint D_padded = (D + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE;
 
+  // omp_get_max_threads since we are still not in omp parallel
+  int number_threads = omp_get_max_threads();
   AlignedPtr<double> centroids = make_aligned<double>(C * S);
-  AlignedPtr<double> accum_sums = make_aligned<double>((C + 1) * S);
-  AlignedPtr<uint> accum_counts = make_aligned<uint>(C + 1);
+  AlignedPtr<double> all_sums   = make_aligned<double>(number_threads * (C + 1) * S);
+  AlignedPtr<uint>   all_counts = make_aligned<uint>(number_threads * (C + 1));
+
+  uint changed_count = 0;
 
   double exec_time = -omp_get_wtime();
 
-  // Initialize clusters using round-robin manner
-  for (uint d = 0; d < D; d++) assignments[d] = d % C;
-  for (uint d = D; d < D_padded; d++) assignments[d] = C;  // Ghost cluster
+  #pragma omp parallel
+  {
+    #pragma omp for nowait
+    for (uint d = 0; d < D; d++) assignments[d] = d % C;
 
-  // First centroid computation
-  update_step(docs.get(), centroids.get(), accum_sums.get(), accum_counts.get(), assignments.get(),
-              C, D, S);
+    #pragma omp single
+    for (uint d = D; d < D_padded; d++) assignments[d] = C; // ghost cluster
 
-  while (reassign_step(docs.get(), centroids.get(), assignments.get(), C, D, D_padded, S)) {
-    update_step(docs.get(), centroids.get(), accum_sums.get(), accum_counts.get(),
-                assignments.get(), C, D, S);
+    update_step(docs.get(), centroids.get(), assignments.get(), C, D, S,
+                all_sums.get(), all_counts.get(), number_threads);
+
+    while (true) {
+      #pragma omp single
+      changed_count = 0;
+
+      reassign_step(docs.get(), centroids.get(), assignments.get(), C, D, D_padded, S, changed_count);
+
+      if (changed_count == 0) break;
+
+      update_step(docs.get(), centroids.get(), assignments.get(), C, D, S,
+                  all_sums.get(), all_counts.get(), number_threads);
+    }
   }
 
   exec_time += omp_get_wtime();
 
-  std::cerr << exec_time << "s" << '\n';
+  std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
   print_result(assignments.get(), D);
 
   // All allocated memory will be cleaned up by RAII
