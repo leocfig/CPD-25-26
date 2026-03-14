@@ -2,7 +2,7 @@
 
 ## How to Run
 ```
-pytest -s [--version=./path/to/version]
+pytest -s [--target=./path/to/version]
 ```
 
 ## Base Tests
