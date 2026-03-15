@@ -132,7 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--parallel", type=str, required=True, help="Path to parallel executable")
     parser.add_argument("-i", "--input-dir", type=str, required=True, help="Directory containing .in files")
     parser.add_argument("-o", "--output", type=str, default="results.csv", help="Output CSV file path")
-    parser.add_argument("-r", "--repetitions", type=int, default=1, help="Statistical repetitions")
+    parser.add_argument("-r", "--repetitions", type=int, default=10, help="Statistical repetitions")
     parser.add_argument("-t", "--threads", type=int, nargs='+', default=[1, 2, 4, 6], help="Thread counts to test")
     parser.add_argument("-a", "--prog-args", type=str, default="", help="Extra args to pass BEFORE the input file")
     
