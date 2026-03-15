@@ -15,4 +15,4 @@ __pycache__/
 *.out
 
 # Targets
-version/serial/src/docs
+**/src/docs*
