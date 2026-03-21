@@ -15,4 +15,6 @@ __pycache__/
 *.out
 
 # Targets
-**/src/docs*
+**/src/docs
+**/src/docs-omp
+**/src/docs-mpi
