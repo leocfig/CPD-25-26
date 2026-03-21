@@ -1,4 +1,4 @@
-CXX      := g++
+CXX      := mpicxx
 OPTFLAGS := -O2 -march=native -mavx2 -mprefer-vector-width=256 -mfma -ffast-math -fopt-info-vec
 CXXFLAGS := -std=c++17 -Wall -Wextra -fopenmp $(OPTFLAGS)
 

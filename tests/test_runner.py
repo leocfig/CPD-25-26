@@ -12,19 +12,19 @@ def find_test_files():
 def test_docs(input_file, pytestconfig):
     # Get the binary path from the --target flag
     target_executable = pytestconfig.getoption("target")
-    
+    mpi_procs = pytestconfig.getoption("mpi_procs")
+    mpi_launcher = pytestconfig.getoption("mpi_launcher")
     expected_file = input_file.with_suffix(".out")
-    
+
     if not expected_file.exists():
         pytest.fail(f"Missing expected output file: {expected_file}")
 
-    # Run the application
-    # We use capture_output=True but print stderr so -s flag can show it
-    process = subprocess.run(
-        [target_executable, str(input_file)],
-        text=True,
-        capture_output=True
-    )
+    if mpi_procs > 0:
+        cmd = [mpi_launcher, "-n", str(mpi_procs), target_executable, str(input_file)]
+    else:
+        cmd = [target_executable, str(input_file)]
+
+    process = subprocess.run(cmd, text=True, capture_output=True)
 
     # Show stderr (useful for OpenMP/MPI stats)
     if process.stderr:
