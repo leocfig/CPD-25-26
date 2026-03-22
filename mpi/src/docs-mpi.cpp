@@ -405,7 +405,7 @@ int main(int argc, char** argv) {
   AlignedPtr<double> mpi_recv_buf = make_aligned<double>(C * S + C + 1);
 
   MPI_Barrier(MPI_COMM_WORLD);
-  double exec_time = -omp_get_wtime();
+  double exec_time = -MPI_Wtime();
 
   #pragma omp parallel
   { 
@@ -433,7 +433,7 @@ int main(int argc, char** argv) {
 
   AlignedPtr<uint> all_assigns = gather_results(assignments.get(), task_nr_docs, D, id, num_procs);
 
-  exec_time += omp_get_wtime();
+  exec_time += MPI_Wtime();
 
   if (!id) {
     std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
