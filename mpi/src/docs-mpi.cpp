@@ -121,7 +121,7 @@ AlignedPtr<uint> gather_results(const uint* local_assigns, uint task_nr_docs, ui
 
 inline void print_result(const uint* assigns, uint D) {
   for (uint d = 0; d < D; d++)
-      std::cout << assigns[d] << '\n';
+    std::cout << assigns[d] << '\n';
   std::cout << std::flush;
 }
 
@@ -158,7 +158,9 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
     }
   }
 
-  #pragma omp for
+  // Reduce OMP thread-local arrays into mpi_send_buf - each thread owns a slice of clusters.
+  // Counts go to mpi_send_buf[C*S .. C*S+C] and sums go to mpi_send_buf[0 .. C*S].
+  #pragma omp for nowait
   for (uint k = 0; k < C; k++) {
     double sum_count = 0.0;
     for (int t = 0; t < number_threads; t++)
@@ -175,13 +177,14 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
 
   #pragma omp single
   {
+    // Append changed_count at the end of the buffer so it gets reduced together with sums and counts
     mpi_send_buf[C * S + C] = (double)changed_count;
     MPI_Allreduce(mpi_send_buf, mpi_recv_buf, C * S + C + 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     changed = (mpi_recv_buf[C * S + C] != 0.0);
   }
 
   // Verify convergence
-  if (mpi_recv_buf[C * S + C] == 0.0) return;
+  if (!changed) return;
 
   // Compute centroids using recv_buf global
   #pragma omp for
