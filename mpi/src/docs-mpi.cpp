@@ -129,7 +129,7 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
                  const uint* __restrict__ assigns, uint C, uint D, uint S,
                  double* __restrict__ all_sums, uint* __restrict__ all_counts, int number_threads,
                  double* __restrict__ mpi_send_buf, double* __restrict__ mpi_recv_buf,
-                 uint changed_count, bool& changed) {
+                 uint changed_count, bool& changed, double& total_comm_time) {
 
   int tid = omp_get_thread_num();
   double* local_sums   = all_sums   + tid * (C + 1) * S;
@@ -179,7 +179,12 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
   {
     // Append changed_count at the end of the buffer so it gets reduced together with sums and counts
     mpi_send_buf[C * S + C] = (double)changed_count;
+
+    double t_comm = -MPI_Wtime();
     MPI_Allreduce(mpi_send_buf, mpi_recv_buf, C * S + C + 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    t_comm += MPI_Wtime();
+
+    total_comm_time += t_comm;
     changed = (mpi_recv_buf[C * S + C] != 0.0);
   }
 
@@ -404,6 +409,8 @@ int main(int argc, char** argv) {
   AlignedPtr<double> mpi_send_buf = make_aligned<double>(C * S + C + 1);
   AlignedPtr<double> mpi_recv_buf = make_aligned<double>(C * S + C + 1);
 
+  double total_comm_time = 0.0;
+
   MPI_Barrier(MPI_COMM_WORLD);
   double exec_time = -MPI_Wtime();
 
@@ -417,7 +424,7 @@ int main(int argc, char** argv) {
     for (uint d = task_nr_docs; d < D_padded; d++) assignments[d] = C; // ghost cluster
 
     update_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, S, all_sums.get(), all_counts.get(),
-                number_threads, mpi_send_buf.get(), mpi_recv_buf.get(), changed_count, changed);
+                number_threads, mpi_send_buf.get(), mpi_recv_buf.get(), changed_count, changed, total_comm_time);
 
     while (changed) {
       #pragma omp single
@@ -427,17 +434,27 @@ int main(int argc, char** argv) {
 
       update_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, S,
                   all_sums.get(), all_counts.get(), number_threads, mpi_send_buf.get(),
-                  mpi_recv_buf.get(), changed_count, changed);
+                  mpi_recv_buf.get(), changed_count, changed, total_comm_time);
     }
   }
 
+  double t_gather = -MPI_Wtime();
   AlignedPtr<uint> all_assigns = gather_results(assignments.get(), task_nr_docs, D, id, num_procs);
+  t_gather += MPI_Wtime();
 
   exec_time += MPI_Wtime();
 
   if (!id) {
-    std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
-    std::cerr.flush();
+    std::cerr << std::fixed << std::setprecision(6)
+              << "Total time: " << exec_time << "s\n"
+              << "Allreduce time: " << total_comm_time << "s\n"
+              << "Gather time: " << t_gather << "s\n"
+              << "Computation time: " << exec_time - total_comm_time - t_gather << "s\n";
+  }
+
+  if (!id) {
+    // std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
+    // std::cerr.flush();
     print_result(all_assigns.get(), D);
   }
   
