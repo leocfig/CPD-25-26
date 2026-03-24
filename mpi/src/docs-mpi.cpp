@@ -364,14 +364,21 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
 }
 
 int main(int argc, char** argv) {
-  MPI_Init(&argc, &argv);
+  int provided;
+  MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
 
   int id, num_procs;
   MPI_Comm_rank(MPI_COMM_WORLD, &id);
   MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
+  if (provided < MPI_THREAD_FUNNELED) {
+    if (!id) std::cerr << "MPI does not provide required threading level" << std::endl;
+    MPI_Finalize();
+    return 1;
+  }
+
   if (argc < 2) {
-    if (id == 0) std::cerr << "Usage: " << argv[0] << " IN_FILE" << std::endl;
+    if (!id) std::cerr << "Usage: " << argv[0] << " IN_FILE" << std::endl;
     MPI_Finalize();
     return 1;
   }
@@ -444,17 +451,17 @@ int main(int argc, char** argv) {
 
   exec_time += MPI_Wtime();
 
-  if (!id) {
-    std::cerr << std::fixed << std::setprecision(6)
-              << "Total time: " << exec_time << "s\n"
-              << "Allreduce time: " << total_comm_time << "s\n"
-              << "Gather time: " << t_gather << "s\n"
-              << "Computation time: " << exec_time - total_comm_time - t_gather << "s\n";
-  }
+  // if (!id) {
+  //   std::cerr << std::fixed << std::setprecision(6)
+  //             << "Total time: " << exec_time << "s\n"
+  //             << "Allreduce time: " << total_comm_time << "s\n"
+  //             << "Gather time: " << t_gather << "s\n"
+  //             << "Computation time: " << exec_time - total_comm_time - t_gather << "s\n";
+  // }
 
   if (!id) {
-    // std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
-    // std::cerr.flush();
+    std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
+    std::cerr.flush();
     print_result(all_assigns.get(), D);
   }
   
