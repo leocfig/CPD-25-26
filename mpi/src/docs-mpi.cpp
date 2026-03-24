@@ -128,7 +128,7 @@ inline void print_result(const uint* assigns, uint D) {
 void update_step(const double* __restrict__ docs, double* __restrict__ centroids,
                  const uint* __restrict__ assigns, uint C, uint D, uint S,
                  double* __restrict__ all_sums, uint* __restrict__ all_counts, int number_threads,
-                 double* __restrict__ mpi_send_buf, double* __restrict__ mpi_recv_buf,
+                 double* __restrict__ mpi_recv_buf,
                  uint changed_count, bool& changed, double& total_comm_time) {
 
   int tid = omp_get_thread_num();
@@ -158,30 +158,30 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
     }
   }
 
-  // Reduce OMP thread-local arrays into mpi_send_buf - each thread owns a slice of clusters.
-  // Counts go to mpi_send_buf[C*S .. C*S+C] and sums go to mpi_send_buf[0 .. C*S].
+  // Reduce OMP thread-local arrays into mpi_recv_buf - each thread owns a slice of clusters.
+  // Counts go to mpi_recv_buf[C*S .. C*S+C] and sums go to mpi_recv_buf[0 .. C*S].
   #pragma omp for nowait
   for (uint k = 0; k < C; k++) {
     double sum_count = 0.0;
     for (int t = 0; t < number_threads; t++)
       sum_count += all_counts[t * (C + 1) + k];
-    mpi_send_buf[C * S + k] = sum_count;
+    mpi_recv_buf[C * S + k] = sum_count;
 
     for (uint s = 0; s < S; s++) {
       double sum = 0.0;
       for (int t = 0; t < number_threads; t++)
         sum += all_sums[t * (C + 1) * S + k * S + s];
-      mpi_send_buf[k * S + s] = sum;
+      mpi_recv_buf[k * S + s] = sum;
     }
   }
 
   #pragma omp single
   {
     // Append changed_count at the end of the buffer so it gets reduced together with sums and counts
-    mpi_send_buf[C * S + C] = (double)changed_count;
+    mpi_recv_buf[C * S + C] = (double)changed_count;
 
     double t_comm = -MPI_Wtime();
-    MPI_Allreduce(mpi_send_buf, mpi_recv_buf, C * S + C + 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, mpi_recv_buf, C * S + C + 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     t_comm += MPI_Wtime();
 
     total_comm_time += t_comm;
@@ -398,7 +398,6 @@ int main(int argc, char** argv) {
   bool changed = true;
 
   // C*S doubles for sums + C doubles for counts + 1 double for the changed_count variable
-  AlignedPtr<double> mpi_send_buf = make_aligned<double>(C * S + C + 1);
   AlignedPtr<double> mpi_recv_buf = make_aligned<double>(C * S + C + 1);
 
   double total_comm_time = 0.0;
@@ -416,7 +415,7 @@ int main(int argc, char** argv) {
     for (uint d = task_nr_docs; d < D_padded; d++) assignments[d] = C; // ghost cluster
 
     update_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, S,
-                all_sums.get(), all_counts.get(), number_threads, mpi_send_buf.get(),
+                all_sums.get(), all_counts.get(), number_threads,
                 mpi_recv_buf.get(), changed_count, changed, total_comm_time);
 
     while (changed) {
@@ -426,7 +425,7 @@ int main(int argc, char** argv) {
       reassign_step(docs.get(), centroids.get(), assignments.get(), C_padded, task_nr_docs, D_padded, S, changed_count);
 
       update_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, S,
-                  all_sums.get(), all_counts.get(), number_threads, mpi_send_buf.get(),
+                  all_sums.get(), all_counts.get(), number_threads,
                   mpi_recv_buf.get(), changed_count, changed, total_comm_time);
     }
   }
