@@ -202,7 +202,8 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
 }
 
 void reassign_step(const double* __restrict__ docs, const double* __restrict__ centroids,
-                   uint* __restrict__ assigns, uint C, uint D, uint D_padded, uint S, uint& changed_count) {
+                   uint* __restrict__ assigns, uint C_padded, uint D, uint D_padded, uint S,
+                   uint& changed_count) {
   const __m256d MAX_DOUBLE = _mm256_set1_pd(std::numeric_limits<double>::max());
 
   #pragma omp for reduction(|:changed_count)
@@ -218,9 +219,8 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
     __m256d best_cluster_A = _mm256_setzero_pd();
     __m256d best_cluster_B = _mm256_setzero_pd();
 
-    uint c = 0;
-    // Using manual loop unrolling to optimize the pipeline by comparing 4 centroids
-    for (; c + 4 <= C; c += 4) {
+    // C_padded is always a multiple of 4, so no remainder loop needed.
+    for (uint c = 0; c < C_padded; c += 4) {
       __m256d d0_A = _mm256_setzero_pd(), d0_B = _mm256_setzero_pd();
       __m256d d1_A = _mm256_setzero_pd(), d1_B = _mm256_setzero_pd();
       __m256d d2_A = _mm256_setzero_pd(), d2_B = _mm256_setzero_pd();
@@ -302,30 +302,6 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
       best_cluster_B = _mm256_blendv_pd(best_cluster_B, local_idx_B, global_cmp_B);
     }
 
-    // We unroll 4 centroids at time, so we must deal with the remainder (ex: 6 centroids
-    // -> 2 remainder)
-    for (; c < C; ++c) {
-      __m256d d_A = _mm256_setzero_pd();
-      __m256d d_B = _mm256_setzero_pd();
-      for (uint s = 0; s < S; ++s) {
-        __m256d doc_A = _mm256_load_pd(&docs[block_start + s * 8 + 0]);
-        __m256d doc_B = _mm256_load_pd(&docs[block_start + s * 8 + 4]);
-        __m256d cent = _mm256_set1_pd(centroids[c * S + s]);
-        d_A = _mm256_fmadd_pd(_mm256_sub_pd(doc_A, cent), _mm256_sub_pd(doc_A, cent), d_A);
-        d_B = _mm256_fmadd_pd(_mm256_sub_pd(doc_B, cent), _mm256_sub_pd(doc_B, cent), d_B);
-      }
-
-      __m256d idx_c = _mm256_set1_pd(static_cast<double>(c));
-
-      __m256d cmp_A = _mm256_cmp_pd(d_A, min_dist_A, _CMP_LT_OQ);
-      min_dist_A = _mm256_min_pd(min_dist_A, d_A);
-      best_cluster_A = _mm256_blendv_pd(best_cluster_A, idx_c, cmp_A);
-
-      __m256d cmp_B = _mm256_cmp_pd(d_B, min_dist_B, _CMP_LT_OQ);
-      min_dist_B = _mm256_min_pd(min_dist_B, d_B);
-      best_cluster_B = _mm256_blendv_pd(best_cluster_B, idx_c, cmp_B);
-    }
-
     // Retrieve the 4 + 4 indices as (32-bit integer) and merge into 256-bit register
     __m128i idx_A_128 = _mm256_cvtpd_epi32(best_cluster_A);
     __m128i idx_B_128 = _mm256_cvtpd_epi32(best_cluster_B);
@@ -403,9 +379,18 @@ int main(int argc, char** argv) {
 
   uint D_padded = (task_nr_docs + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE;
 
+  // Pad C to the next multiple of 4 so reassign_step has no remainder loop.
+  // Ghost centroids are filled with a large (but finite) value so they are
+  // never selected as nearest cluster, and (max/2)^2 won't overflow in fmadd.
+  uint C_padded = (C + 3) / 4 * 4;
+
   // omp_get_max_threads since we are still not in omp parallel
   int number_threads = omp_get_max_threads();
-  AlignedPtr<double> centroids = make_aligned<double>(C * S);
+
+  // Allocate C_padded slots; initialise ghost centroids to +inf/2
+  AlignedPtr<double> centroids = make_aligned<double>(C_padded * S);
+  std::fill_n(centroids.get() + C * S, (C_padded - C) * S, std::numeric_limits<double>::max() / 2.0);
+
   AlignedPtr<double> all_sums   = make_aligned<double>(number_threads * (C + 1) * S);
   AlignedPtr<uint>   all_counts = make_aligned<uint>(number_threads * (C + 1));
 
@@ -430,14 +415,15 @@ int main(int argc, char** argv) {
     #pragma omp single
     for (uint d = task_nr_docs; d < D_padded; d++) assignments[d] = C; // ghost cluster
 
-    update_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, S, all_sums.get(), all_counts.get(),
-                number_threads, mpi_send_buf.get(), mpi_recv_buf.get(), changed_count, changed, total_comm_time);
+    update_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, S,
+                all_sums.get(), all_counts.get(), number_threads, mpi_send_buf.get(),
+                mpi_recv_buf.get(), changed_count, changed, total_comm_time);
 
     while (changed) {
       #pragma omp single
       changed_count = 0;
 
-      reassign_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, D_padded, S, changed_count);
+      reassign_step(docs.get(), centroids.get(), assignments.get(), C_padded, task_nr_docs, D_padded, S, changed_count);
 
       update_step(docs.get(), centroids.get(), assignments.get(), C, task_nr_docs, S,
                   all_sums.get(), all_counts.get(), number_threads, mpi_send_buf.get(),
@@ -451,13 +437,13 @@ int main(int argc, char** argv) {
 
   exec_time += MPI_Wtime();
 
-  // if (!id) {
-  //   std::cerr << std::fixed << std::setprecision(6)
-  //             << "Total time: " << exec_time << "s\n"
-  //             << "Allreduce time: " << total_comm_time << "s\n"
-  //             << "Gather time: " << t_gather << "s\n"
-  //             << "Computation time: " << exec_time - total_comm_time - t_gather << "s\n";
-  // }
+  if (!id) {
+    std::cerr << std::fixed << std::setprecision(6)
+              << "Total time: " << exec_time << "s\n"
+              << "Allreduce time: " << total_comm_time << "s\n"
+              << "Gather time: " << t_gather << "s\n"
+              << "Computation time: " << exec_time - total_comm_time - t_gather << "s\n";
+  }
 
   if (!id) {
     std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
