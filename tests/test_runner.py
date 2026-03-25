@@ -2,6 +2,7 @@
 import pytest
 import subprocess
 import pathlib
+import os
 
 def find_test_files():
     """Recursively finds all .in files in the tests directory."""
@@ -19,8 +20,13 @@ def test_docs(input_file, pytestconfig):
     if not expected_file.exists():
         pytest.fail(f"Missing expected output file: {expected_file}")
 
+    cpus = os.environ.get("OMP_NUM_THREADS", "1")
+
     if mpi_procs > 0:
-        cmd = [mpi_launcher, "-n", str(mpi_procs), target_executable, str(input_file)]
+        if mpi_launcher == "srun":
+            cmd = [mpi_launcher, "-n", str(mpi_procs), "-c", cpus, target_executable, str(input_file)]
+        else:
+            cmd = [mpi_launcher, "-n", str(mpi_procs), target_executable, str(input_file)]
     else:
         cmd = [target_executable, str(input_file)]
 

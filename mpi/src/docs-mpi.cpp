@@ -160,7 +160,7 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
 
   // Reduce OMP thread-local arrays into mpi_recv_buf - each thread owns a slice of clusters.
   // Counts go to mpi_recv_buf[C*S .. C*S+C] and sums go to mpi_recv_buf[0 .. C*S].
-  #pragma omp for nowait
+  #pragma omp for
   for (uint k = 0; k < C; k++) {
     double sum_count = 0.0;
     for (int t = 0; t < number_threads; t++)
@@ -369,7 +369,10 @@ int main(int argc, char** argv) {
     std::ifstream input(argv[1]);
     if (!input) throw std::runtime_error("Failed to open file '" + std::string(argv[1]));
 
+    double t_parse = -MPI_Wtime();
     parse_input(input, assignments, docs, C, D, S, id, num_procs, task_nr_docs, task_first_doc);
+    t_parse += MPI_Wtime();
+    if (!id) std::cerr << "Parse time: " << t_parse << "s\n";
 
   } catch (const std::exception& e) {
     std::cerr << "[rank " << id << "] " << e.what() << std::endl;
