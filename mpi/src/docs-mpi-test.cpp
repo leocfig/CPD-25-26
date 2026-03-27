@@ -64,9 +64,12 @@ void parse_input(std::ifstream& in_stream, AlignedPtr<uint>& assigns, AlignedPtr
   task_first_doc = DOCS_LOW(id, num_procs, D);
   task_nr_docs = DOCS_SIZE(id, num_procs, D);
 
-  for (uint d = 0; d < task_first_doc; d++) {
-    for (uint s = 0; s < S; s++) UNIF01;
-  }
+  srand(SEED);
+
+  // Skipping
+  for (uint d = 0; d < task_first_doc; d++)
+    for (uint s = 0; s < S; s++)
+        UNIF01;
 
   // To avoid extra branch mispredictions, we pad the document array with extra "ghost" documents
   // Since we process blocks of documents, we don't have to bounds checking. These ghost documents
@@ -80,7 +83,6 @@ void parse_input(std::ifstream& in_stream, AlignedPtr<uint>& assigns, AlignedPtr
 
   // NOTE: This is a modified version of our parsing that uses RNG for the subject values. 
   // This allows us to test extremely big instances in Deucalion without having to generate huge files
-  srand(SEED);
   for (uint d = 0; d < task_nr_docs; d++) {
     uint block_idx = d / BLOCK_SIZE;
     uint lane = d % BLOCK_SIZE;
