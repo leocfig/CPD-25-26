@@ -64,6 +64,11 @@ void parse_input(std::ifstream& in_stream, AlignedPtr<uint>& assigns, AlignedPtr
   task_first_doc = DOCS_LOW(id, num_procs, D);
   task_nr_docs = DOCS_SIZE(id, num_procs, D);
 
+  for (uint d = 0; d < task_first_doc; d++) {
+    float a = 0;
+    for (uint s = 0; s < S; s++) a = UNIF01 * RAND_RANGE;
+  }
+
   // To avoid extra branch mispredictions, we pad the document array with extra "ghost" documents
   // Since we process blocks of documents, we don't have to bounds checking. These ghost documents
   // are initialized to 0, so they contribute nothing to the result
