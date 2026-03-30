@@ -229,12 +229,11 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
     double t_comm = -MPI_Wtime();
 
     MPI_Allreduce(MPI_IN_PLACE, mpi_recv_buf,
-                  (int)(task_nr_cents * S + task_nr_cents),
-                  MPI_DOUBLE, MPI_SUM, g.col_comm);
+                  (int)(task_nr_cents * S + task_nr_cents + 1),
+                  MPI_DOUBLE, MPI_SUM, g.col_comm); 
 
     double global_changed = mpi_recv_buf[task_nr_cents * S + task_nr_cents];
-    MPI_Allreduce(MPI_IN_PLACE, &global_changed, 1,
-                  MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Bcast(&global_changed, 1, MPI_DOUBLE, 0, g.row_comm);
 
     t_comm += MPI_Wtime();
 
