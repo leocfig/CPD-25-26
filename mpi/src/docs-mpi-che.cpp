@@ -378,7 +378,6 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
   {
     MPI_Allreduce(MPI_IN_PLACE, local_pairs, (int)D_padded, MPI_DOUBLE_INT, MPI_MINLOC, g.row_comm);
   }
-  #pragma omp barrier
 
   #pragma omp for reduction(|:changed_count)
   for (uint block_idx = 0; block_idx < D_padded; block_idx += BLOCK_SIZE) {
