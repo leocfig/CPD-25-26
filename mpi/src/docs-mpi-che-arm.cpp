@@ -272,12 +272,12 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
     int    best_idx[BLOCK_SIZE];
     for (uint i = 0; i < BLOCK_SIZE; i++) {
       min_dist[i] = std::numeric_limits<double>::max();
-      best_idx[i] = (int)C_padded_local; // sentinel
+      best_idx[i] = 0;
     }
 
     for (uint c = 0; c < C_padded_local; c += 4) {
-      double d0[BLOCK_SIZE] = {0}, d1[BLOCK_SIZE] = {0};
-      double d2[BLOCK_SIZE] = {0}, d3[BLOCK_SIZE] = {0};
+      double d0[BLOCK_SIZE] = {}, d1[BLOCK_SIZE] = {};
+      double d2[BLOCK_SIZE] = {}, d3[BLOCK_SIZE] = {};
 
       for (uint s = 0; s < S; ++s) {
         double cent0 = centroids[(c + 0) * S + s];
@@ -298,17 +298,13 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
         }
       }
 
-      // argmin tournament (mesma lógica do AVX original, mas escalar)
-      #pragma GCC ivdep
       for (uint lane = 0; lane < BLOCK_SIZE; lane++) {
-        // d0 vs d1
-        double m01, m23;
-        int    i01, i23;
-        if (d1[lane] < d0[lane]) { m01 = d1[lane]; i01 = (int)(task_first_cent + c + 1); }
-        else                     { m01 = d0[lane]; i01 = (int)(task_first_cent + c + 0); }
+        double m01 = d0[lane], m23 = d2[lane];
+        int    i01 = (int)(task_first_cent + c + 0);
+        int    i23 = (int)(task_first_cent + c + 2);
 
-        if (d3[lane] < d2[lane]) { m23 = d3[lane]; i23 = (int)(task_first_cent + c + 3); }
-        else                     { m23 = d2[lane]; i23 = (int)(task_first_cent + c + 2); }
+        if (d1[lane] < m01) { m01 = d1[lane]; i01 = (int)(task_first_cent + c + 1); }
+        if (d3[lane] < m23) { m23 = d3[lane]; i23 = (int)(task_first_cent + c + 3); }
 
         double local_min = (m23 < m01) ? m23 : m01;
         int    local_idx = (m23 < m01) ? i23 : i01;
