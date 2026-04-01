@@ -166,10 +166,10 @@ inline void print_result(const uint* assigns, uint D) {
 }
 
 // Buffer layout (all doubles):
-//   [0 .. task_nr_cents*S)                                   - sums
-//   [task_nr_cents*S .. *S+C)                                - counts
-//   [task_nr_cents*S + task_nr_cents]                        - changed_count
-//   [task_nr_cents*S + task_nr_cents+1 .. +1+task_nr_cents)  - dirty flags (0.0 or 1.0)
+//   [0 .. task_nr_cents*S)                                   — sums
+//   [task_nr_cents*S .. *S+C)                                — counts
+//   [task_nr_cents*S + task_nr_cents]                        — changed_count
+//   [task_nr_cents*S + task_nr_cents+1 .. +1+task_nr_cents)  — dirty flags (0.0 or 1.0)
 //
 // Everything is reduced in a single MPI_Allreduce with MPI_SUM over col_comm.
 // dirty[k] > 0.0 after the reduce means at least one row-process saw a change for cluster k.
@@ -178,7 +178,7 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
                  uint task_nr_docs, uint task_nr_cents, uint task_first_cent,
                  double* __restrict__ all_sums, uint* __restrict__ all_counts, int number_threads,
                  double* __restrict__ mpi_recv_buf,
-                 const bool* __restrict__ dirty,          // [task_nr_cents] - which clusters need update
+                 const bool* __restrict__ dirty,          // [task_nr_cents] — which clusters need update
                  uint changed_count, bool& changed, double& total_comm_time,
                  const Grid& g) {
 
@@ -192,41 +192,32 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
   double* local_sums   = all_sums   + (size_t)tid * (task_nr_cents + 1) * S;
   uint*   local_counts = all_counts + (size_t)tid * (task_nr_cents + 1);
 
-  // Zero dirty clusters in thread-local accumulators AND in mpi_recv_buf.
-  // The recv_buf dirty slots must be cleared so that stale 1.0 values from a previous
-  // iteration don't survive into the Allreduce for clusters that are now clean.
-  // Clean clusters keep their thread-local accumulators but are never read below.
-  #pragma omp for nowait
-  for (uint k = 0; k < task_nr_cents; k++) {
-    if (!dirty[k]) continue;
+  // Zero mpi_recv_buf and all thread-local accumulators before each iteration.
+  // We accumulate all clusters unconditionally (no dirty skip on the hot path),
+  // so everything must be clean. The omp single + omp for give an implicit barrier.
+  #pragma omp single
+  {
+    std::fill_n(mpi_recv_buf, buf_size, 0.0);
+  }
+  // Zero all thread-local accumulators in parallel across clusters (better load balance)
+  #pragma omp for
+  for (uint k = 0; k <= task_nr_cents; k++) {  // <= includes ghost slot
     for (int t = 0; t < number_threads; t++) {
       std::fill_n(all_sums   + (size_t)t * (task_nr_cents + 1) * S + k * S, S, 0.0);
       all_counts[(size_t)t * (task_nr_cents + 1) + k] = 0u;
     }
-    // Zero the corresponding recv_buf slots so Allreduce starts clean
-    std::fill_n(mpi_recv_buf + k * S, S, 0.0);
-    mpi_recv_buf[off_counts + k] = 0.0;
-    mpi_recv_buf[off_dirty  + k] = 0.0;
   }
-  // Always zero the ghost slot so it doesn't accumulate across iterations
-  #pragma omp single nowait
-  {
-    for (int t = 0; t < number_threads; t++) {
-      all_counts[(size_t)t * (task_nr_cents + 1) + task_nr_cents] = 0u;
-      std::fill_n(all_sums + (size_t)t * (task_nr_cents + 1) * S + task_nr_cents * S, S, 0.0);
-    }
-  }
-  #pragma omp barrier
 
+  // Accumulate all documents unconditionally — skipping dirty check here avoids
+  // branch mispredictions on the hot path and removes subtle correctness issues.
+  // The lazy skip is applied only in the reduce-to-buffer and centroid-update steps.
   #pragma omp for
   for (uint block_offset = 0; block_offset < task_nr_docs; block_offset += BLOCK_SIZE) {
     for (uint i = 0; i < BLOCK_SIZE; i++) {
       uint k = assigns[block_offset + i];
       uint lk = (k >= task_first_cent && k < task_first_cent + task_nr_cents)
                 ? (k - task_first_cent) : task_nr_cents;
-      // Only accumulate into dirty clusters (ghost slot is always accumulated)
-      if (lk == task_nr_cents || dirty[lk])
-        local_counts[lk]++;
+      local_counts[lk]++;
     }
 
     size_t block_start_idx = (block_offset / BLOCK_SIZE) * (S * BLOCK_SIZE);
@@ -239,15 +230,13 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
         uint k = assigns[block_offset + i];
         uint lk = (k >= task_first_cent && k < task_first_cent + task_nr_cents)
                   ? (k - task_first_cent) : task_nr_cents;
-        if (lk == task_nr_cents || dirty[lk])
-          local_sums[lk * S + subj_idx] += val;
+        local_sums[lk * S + subj_idx] += val;
       }
     }
   }
 
-  // Reduce OMP thread-local arrays into mpi_recv_buf - each thread owns a slice of clusters.
-  // Counts go to mpi_recv_buf[task_nr_cents*S .. task_nr_cents*S+task_nr_cents] and sums go to mpi_recv_buf[0 .. task_nr_cents*S].
-  // Only pack dirty clusters; clean clusters keep their stale buffer values (never read after reduce).
+  // Reduce OMP thread-local arrays into mpi_recv_buf.
+  // Only pack dirty clusters — clean centroids are not updated this iteration.
   #pragma omp for
   for (uint k = 0; k < task_nr_cents; k++) {
     if (!dirty[k]) continue;
@@ -313,7 +302,7 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
                    uint* __restrict__ assigns, uint C_padded_local,
                    uint task_nr_docs, uint task_nr_cents, uint D_padded, uint S,
                    uint task_first_cent, DistIdx* __restrict__ local_pairs,
-                   bool* __restrict__ dirty,
+                   bool* __restrict__ dirty,              // [task_nr_cents] — reset and re-marked here
                    uint& changed_count, const Grid& g) {
 
   const __m256d MAX_DOUBLE = _mm256_set1_pd(std::numeric_limits<double>::max());
@@ -430,7 +419,7 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
     MPI_Allreduce(MPI_IN_PLACE, local_pairs, (int)D_padded, MPI_DOUBLE_INT, MPI_MINLOC, g.row_comm);
   }
 
-  // Reset dirty flags for this iteration - will be re-marked below for changed documents
+  // Reset dirty flags for this iteration — will be re-marked below for changed documents
   #pragma omp for
   for (uint k = 0; k < task_nr_cents; k++)
     dirty[k] = false;
@@ -459,7 +448,8 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
     changed_count |= changed_bits;
 
     // Mark dirty: for each document that changed, mark both old and new cluster dirty.
-    // Writing true from multiple threads to the same slot is safe (idempotent).
+    // dirty[] is local to this process; cross-process OR happens in update_step via mpi_recv_buf.
+    // Writing true from multiple threads to the same slot is safe (idempotent bool store).
     if (changed_bits) {
       const int* old_raw = reinterpret_cast<const int*>(&assigns[block_idx]);
       for (uint i = 0; i < (uint)valid_docs; i++) {
@@ -483,6 +473,7 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
       __m256i v_seq = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
       __m256i store_mask = _mm256_cmpgt_epi32(v_docs, v_seq);
 
+      // Only writes to memory if the mask lane's MSB is 1.
       // Ghost documents will be calculated, we cannot update their assignements, otherwise the
       // algorithm breaks
       _mm256_maskstore_epi32(reinterpret_cast<int*>(&assigns[block_idx]), store_mask, new_idx_256);
@@ -564,7 +555,7 @@ int main(int argc, char** argv) {
   AlignedPtr<double> all_sums   = make_aligned<double>((size_t)number_threads * (task_nr_cents + 1) * S);
   AlignedPtr<uint>   all_counts = make_aligned<uint>  ((size_t)number_threads * (task_nr_cents + 1));
 
-  // dirty[k] == true  -> centroid k needs to be recomputed this iteration.
+  // dirty[k] == true  → centroid k needs to be recomputed this iteration.
   // First iteration: all clusters are dirty (all centroids are zero and need to be set).
   AlignedPtr<bool> dirty = make_aligned<bool>(task_nr_cents);
   std::fill_n(dirty.get(), task_nr_cents, true);
@@ -573,6 +564,7 @@ int main(int argc, char** argv) {
   bool changed = true;
 
   // Buffer layout: sums (C*S) | counts (C) | changed (1) | dirty flags (C)
+  // The dirty flags travel for free inside the existing col_comm Allreduce — no extra communication.
   // Zero-initialised so slots for clean clusters never contribute garbage to the Allreduce.
   size_t recv_buf_size = task_nr_cents * S + task_nr_cents + 1 + task_nr_cents;
   AlignedPtr<double> mpi_recv_buf = make_aligned<double>(recv_buf_size);
