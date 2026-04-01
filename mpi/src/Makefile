@@ -1,5 +1,5 @@
 CXX      := mpicxx
-OPTFLAGS := -O2 -march=native -mavx2 -mprefer-vector-width=256 -mfma -ffast-math -fopt-info-vec
+OPTFLAGS := -O2 -mcpu=a64fx+sve -msve-vector-bits=512 -ffast-math -fopt-info-vec
 CXXFLAGS := -std=c++17 -Wall -Wextra -fopenmp $(OPTFLAGS)
 
 SRCS     := $(wildcard *.cpp)
