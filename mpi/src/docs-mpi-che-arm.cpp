@@ -1,3 +1,4 @@
+#include <arm_sve.h>
 #include <omp.h>
 #include <mpi.h>
 
@@ -7,6 +8,8 @@
 #include <memory>
 #include <iomanip>
 #include <cmath>
+#include <cassert>
+
 
 // Hardcoded for working with 8 doubles -> 2 256-bit avx2 registers
 // Also useful since one block fills a unique cache line
@@ -264,78 +267,100 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
                    uint task_first_cent, DistIdx* __restrict__ local_pairs,
                    uint& changed_count, const Grid& g) {
 
+  assert(svcntd() >= BLOCK_SIZE && "SVE vector width < 512 bits; incompatível com BLOCK_SIZE=8");
+
+  const svbool_t pg_8 = svwhilelt_b64((uint64_t)0, (uint64_t)BLOCK_SIZE);
+
   #pragma omp for
   for (uint block_idx = 0; block_idx < D_padded; block_idx += BLOCK_SIZE) {
     size_t block_start = (block_idx / BLOCK_SIZE) * (S * BLOCK_SIZE);
 
-    double min_dist[BLOCK_SIZE];
-    int    best_idx[BLOCK_SIZE];
-    for (uint i = 0; i < BLOCK_SIZE; i++) {
-      min_dist[i] = std::numeric_limits<double>::max();
-      best_idx[i] = 0;
-    }
+    svfloat64_t min_dist     = svdup_n_f64(std::numeric_limits<double>::max());
+    svfloat64_t best_cluster = svdup_n_f64(0.0);
 
     for (uint c = 0; c < C_padded_local; c += 4) {
-      double d0[BLOCK_SIZE] = {}, d1[BLOCK_SIZE] = {};
-      double d2[BLOCK_SIZE] = {}, d3[BLOCK_SIZE] = {};
+      svfloat64_t d0 = svdup_n_f64(0.0), d1 = svdup_n_f64(0.0);
+      svfloat64_t d2 = svdup_n_f64(0.0), d3 = svdup_n_f64(0.0);
 
       for (uint s = 0; s < S; ++s) {
-        double cent0 = centroids[(c + 0) * S + s];
-        double cent1 = centroids[(c + 1) * S + s];
-        double cent2 = centroids[(c + 2) * S + s];
-        double cent3 = centroids[(c + 3) * S + s];
-        const double* doc_block = &docs[block_start + s * BLOCK_SIZE];
+        svfloat64_t doc = svld1_f64(pg_8, &docs[block_start + s * BLOCK_SIZE]);
 
-        #pragma GCC ivdep
-        for (uint lane = 0; lane < BLOCK_SIZE; lane++) {
-          double v = doc_block[lane];
-          double diff0 = v - cent0, diff1 = v - cent1;
-          double diff2 = v - cent2, diff3 = v - cent3;
-          d0[lane] += diff0 * diff0;
-          d1[lane] += diff1 * diff1;
-          d2[lane] += diff2 * diff2;
-          d3[lane] += diff3 * diff3;
-        }
+        svfloat64_t cent0 = svdup_n_f64(centroids[(c + 0) * S + s]);
+        svfloat64_t diff0 = svsub_f64_x(pg_8, doc, cent0);
+        d0 = svmla_f64_x(pg_8, d0, diff0, diff0);
+
+        svfloat64_t cent1 = svdup_n_f64(centroids[(c + 1) * S + s]);
+        svfloat64_t diff1 = svsub_f64_x(pg_8, doc, cent1);
+        d1 = svmla_f64_x(pg_8, d1, diff1, diff1);
+
+        svfloat64_t cent2 = svdup_n_f64(centroids[(c + 2) * S + s]);
+        svfloat64_t diff2 = svsub_f64_x(pg_8, doc, cent2);
+        d2 = svmla_f64_x(pg_8, d2, diff2, diff2);
+
+        svfloat64_t cent3 = svdup_n_f64(centroids[(c + 3) * S + s]);
+        svfloat64_t diff3 = svsub_f64_x(pg_8, doc, cent3);
+        d3 = svmla_f64_x(pg_8, d3, diff3, diff3);
       }
 
-      for (uint lane = 0; lane < BLOCK_SIZE; lane++) {
-        double m01 = d0[lane], m23 = d2[lane];
-        int    i01 = (int)(task_first_cent + c + 0);
-        int    i23 = (int)(task_first_cent + c + 2);
+      svfloat64_t idx0 = svdup_n_f64(static_cast<double>(task_first_cent + c + 0));
+      svfloat64_t idx1 = svdup_n_f64(static_cast<double>(task_first_cent + c + 1));
+      svfloat64_t idx2 = svdup_n_f64(static_cast<double>(task_first_cent + c + 2));
+      svfloat64_t idx3 = svdup_n_f64(static_cast<double>(task_first_cent + c + 3));
 
-        if (d1[lane] < m01) { m01 = d1[lane]; i01 = (int)(task_first_cent + c + 1); }
-        if (d3[lane] < m23) { m23 = d3[lane]; i23 = (int)(task_first_cent + c + 3); }
+      svbool_t    cmp10  = svcmplt_f64(pg_8, d1, d0);
+      svfloat64_t min01  = svmin_f64_x(pg_8, d0, d1);
+      svfloat64_t idx01  = svsel_f64(cmp10, idx1, idx0);
 
-        double local_min = (m23 < m01) ? m23 : m01;
-        int    local_idx = (m23 < m01) ? i23 : i01;
+      svbool_t    cmp32  = svcmplt_f64(pg_8, d3, d2);
+      svfloat64_t min23  = svmin_f64_x(pg_8, d2, d3);
+      svfloat64_t idx23  = svsel_f64(cmp32, idx3, idx2);
 
-        if (local_min < min_dist[lane]) {
-          min_dist[lane] = local_min;
-          best_idx[lane] = local_idx;
-        }
-      }
+      svbool_t    cmp0123   = svcmplt_f64(pg_8, min23, min01);
+      svfloat64_t local_min = svmin_f64_x(pg_8, min01, min23);
+      svfloat64_t local_idx = svsel_f64(cmp0123, idx23, idx01);
+
+      svbool_t global_cmp = svcmplt_f64(pg_8, local_min, min_dist);
+      min_dist     = svmin_f64_x(pg_8, min_dist, local_min);
+      best_cluster = svsel_f64(global_cmp, local_idx, best_cluster);
     }
 
+    alignas(ALIGN) double dists[BLOCK_SIZE];
+    alignas(ALIGN) double idxs[BLOCK_SIZE];
+    svst1_f64(pg_8, dists, min_dist);
+    svst1_f64(pg_8, idxs,  best_cluster);
+
     for (uint i = 0; i < BLOCK_SIZE; i++)
-      local_pairs[block_idx + i] = { min_dist[i], best_idx[i] };
+      local_pairs[block_idx + i] = { dists[i], (int)idxs[i] };
   }
 
   #pragma omp single
   {
-    MPI_Allreduce(MPI_IN_PLACE, local_pairs, (int)D_padded, MPI_DOUBLE_INT, MPI_MINLOC, g.row_comm);
+    MPI_Allreduce(MPI_IN_PLACE, local_pairs, (int)D_padded,
+                  MPI_DOUBLE_INT, MPI_MINLOC, g.row_comm);
   }
 
   #pragma omp for reduction(|:changed_count)
   for (uint block_idx = 0; block_idx < D_padded; block_idx += BLOCK_SIZE) {
-    int valid_docs = std::min((int)BLOCK_SIZE,
-                              std::max(0, (int)task_nr_docs - (int)block_idx));
+    uint valid_docs = (uint)std::min(
+        (int)BLOCK_SIZE,
+        std::max(0, (int)task_nr_docs - (int)block_idx));
 
-    for (int i = 0; i < valid_docs; i++) {
-      uint new_id = (uint)local_pairs[block_idx + i].idx;
-      if (assigns[block_idx + i] != new_id) {
-        changed_count |= 1u;
-        assigns[block_idx + i] = new_id;
-      }
+    // b32 para predicar loads/stores de uint (32 bits)
+    svbool_t pg_valid = svwhilelt_b32((uint32_t)0, (uint32_t)valid_docs);
+
+    alignas(ALIGN) uint new_ids[BLOCK_SIZE];
+    for (uint i = 0; i < BLOCK_SIZE; i++)
+      new_ids[i] = (uint)local_pairs[block_idx + i].idx;
+
+    svuint32_t new_idx = svld1_u32(pg_valid, new_ids);
+    svuint32_t old_idx = svld1_u32(pg_valid, &assigns[block_idx]);
+
+    svbool_t eq_mask      = svcmpeq_u32(pg_valid, new_idx, old_idx);
+    svbool_t changed_mask = svbic_b_z(pg_valid, pg_valid, eq_mask);
+
+    if (svptest_any(pg_valid, changed_mask)) {
+      changed_count |= 1;
+      svst1_u32(pg_valid, &assigns[block_idx], new_idx);
     }
   }
 }
