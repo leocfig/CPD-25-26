@@ -293,10 +293,14 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
   }
 }
 
+// MPI_DOUBLE_INT expects layout: { double (8 bytes), int (4 bytes), 4 bytes padding } = 16 bytes.
+// The explicit _pad field forces the struct to match that layout exactly.
 struct DistIdx {
   double dist;
   int    idx;
+  int    _pad;
 };
+static_assert(sizeof(DistIdx) == 16, "DistIdx must be 16 bytes to match MPI_DOUBLE_INT");
 
 void reassign_step(const double* __restrict__ docs, const double* __restrict__ centroids,
                    uint* __restrict__ assigns, uint C_padded_local,
