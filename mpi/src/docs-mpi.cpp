@@ -429,13 +429,7 @@ int main(int argc, char** argv) {
   try {
     std::ifstream input(argv[1]);
     if (!input) throw std::runtime_error("Failed to open file '" + std::string(argv[1]));
-
-    double t_parse = -MPI_Wtime();
-    parse_input(input, assignments, docs, C, D, S, g,
-                task_nr_docs, task_first_doc, task_nr_cents, task_first_cent);
-    t_parse += MPI_Wtime();
-    if (!id) std::cerr << "Parse time: " << t_parse << "s\n";
-
+    parse_input(input, assignments, docs, C, D, S, g, task_nr_docs, task_first_doc, task_nr_cents, task_first_cent);
   } catch (const std::exception& e) {
     std::cerr << "[rank " << id << "] " << e.what() << std::endl;
     MPI_Finalize();
