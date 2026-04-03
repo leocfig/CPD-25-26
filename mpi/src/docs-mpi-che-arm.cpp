@@ -61,12 +61,13 @@ struct Grid {
 Grid make_grid(int num_procs, int id) {
   Grid g;
   int sq = (int)std::round(std::sqrt((double)num_procs));
-  if (sq * sq != num_procs)
+  if (sq * sq != num_procs) {
     throw std::runtime_error("Number of processes must be a perfect square");
+  }
 
   g.nrows = g.ncols = sq;
 
-  int dims[2]    = {sq, sq};
+  int dims[2] = {sq, sq};
   int periods[2] = {0, 0};
   MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, 0, &g.grid_comm);
 
@@ -91,7 +92,7 @@ void parse_input(std::ifstream& in_stream, AlignedPtr<uint>& assigns, AlignedPtr
     throw std::runtime_error("Invalid Header");
   }
 
-  // Distributed block decomposition
+  // Block decomposition
   task_first_doc  = DOCS_LOW(g.my_row, g.nrows, D);
   task_nr_docs    = DOCS_SIZE(g.my_row, g.nrows, D);
   task_first_cent = DOCS_LOW(g.my_col, g.ncols, C);
@@ -110,7 +111,7 @@ void parse_input(std::ifstream& in_stream, AlignedPtr<uint>& assigns, AlignedPtr
   uint padded_doc_size = (task_nr_docs + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE;
 
   assigns = make_aligned<uint>(padded_doc_size);
-  docs    = make_aligned<double>(padded_doc_size * S);
+  docs = make_aligned<double>(padded_doc_size * S);
 
   std::fill_n(docs.get(), padded_doc_size * S, 0.0);
 
@@ -131,11 +132,13 @@ AlignedPtr<uint> gather_results(const uint* local_assigns, uint task_nr_docs, ui
   MPI_Comm col0_comm = MPI_COMM_NULL;
   MPI_Comm_split(MPI_COMM_WORLD, g.my_col == 0 ? 0 : MPI_UNDEFINED, g.my_row, &col0_comm);
 
+  // Only processes in the first column participate in col0_comm, because they already have the local assignments for its own row
   if (g.my_col != 0) return nullptr;
 
+  // Only the root of the first row (my_row == 0) will gather the complete assignments
   if (!g.my_row) {
     AlignedPtr<int> recvcounts = make_aligned<int>(g.nrows);
-    AlignedPtr<int> displs     = make_aligned<int>(g.nrows);
+    AlignedPtr<int> displs = make_aligned<int>(g.nrows);
 
     displs[0] = 0;
     for (int i = 0; i < g.nrows; i++) {
@@ -145,17 +148,11 @@ AlignedPtr<uint> gather_results(const uint* local_assigns, uint task_nr_docs, ui
 
     AlignedPtr<uint> all_assigns = make_aligned<uint>(D);
 
-    MPI_Gatherv(local_assigns, (int)task_nr_docs, MPI_UNSIGNED,
-                all_assigns.get(), recvcounts.get(), displs.get(), MPI_UNSIGNED,
-                0, col0_comm);
-
+    MPI_Gatherv(local_assigns, (int)task_nr_docs, MPI_UNSIGNED, all_assigns.get(), recvcounts.get(), displs.get(), MPI_UNSIGNED, 0, col0_comm);
     MPI_Comm_free(&col0_comm);
     return all_assigns;
   } else {
-    MPI_Gatherv(local_assigns, (int)task_nr_docs, MPI_UNSIGNED,
-                nullptr, nullptr, nullptr, MPI_UNSIGNED,
-                0, col0_comm);
-
+    MPI_Gatherv(local_assigns, (int)task_nr_docs, MPI_UNSIGNED, nullptr, nullptr, nullptr, MPI_UNSIGNED, 0, col0_comm);
     MPI_Comm_free(&col0_comm);
     return nullptr;
   }
@@ -168,27 +165,25 @@ inline void print_result(const uint* assigns, uint D) {
 }
 
 void update_step(const double* __restrict__ docs, double* __restrict__ centroids,
-                 const uint* __restrict__ assigns, uint S,
-                 uint task_nr_docs, uint task_nr_cents, uint task_first_cent,
+                 const uint* __restrict__ assigns, uint S, uint task_nr_docs, uint task_nr_cents, uint task_first_cent,
                  double* __restrict__ all_sums, uint* __restrict__ all_counts, int number_threads,
-                 double* __restrict__ mpi_recv_buf,
-                 uint changed_count, bool& changed, double& total_comm_time,
-                 const Grid& g) {
+                 double* __restrict__ mpi_recv_buf, uint changed_count, bool& changed, const Grid& g) {
 
   int tid = omp_get_thread_num();
-  double* local_sums   = all_sums   + (size_t)tid * (task_nr_cents + 1) * S;
-  uint*   local_counts = all_counts + (size_t)tid * (task_nr_cents + 1);
+  double* local_sums = all_sums + (size_t)tid * (task_nr_cents + 1) * S;
+  uint* local_counts = all_counts + (size_t)tid * (task_nr_cents + 1);
 
-  std::fill_n(local_sums,   (task_nr_cents + 1) * S, 0.0);
-  std::fill_n(local_counts,  task_nr_cents + 1,       0u);
+  // Initialize per-thread sums and counts (including ghost cluster)
+  std::fill_n(local_sums, (task_nr_cents + 1) * S, 0.0);
+  std::fill_n(local_counts, task_nr_cents + 1, 0u);
 
+  // Accumulation of counts and sums
   #pragma omp for
   for (uint block_offset = 0; block_offset < task_nr_docs; block_offset += BLOCK_SIZE) {
     for (uint i = 0; i < BLOCK_SIZE; i++) {
       uint k = assigns[block_offset + i];
-      uint lk = (k >= task_first_cent && k < task_first_cent + task_nr_cents)
-                ? (k - task_first_cent) : task_nr_cents;
-      local_counts[lk]++;
+      uint local_k = (k >= task_first_cent && k < task_first_cent + task_nr_cents) ? (k - task_first_cent) : task_nr_cents;
+      local_counts[local_k]++;
     }
 
     size_t block_start_idx = (block_offset / BLOCK_SIZE) * (S * BLOCK_SIZE);
@@ -199,15 +194,13 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
       for (uint i = 0; i < BLOCK_SIZE; ++i) {
         double val = subj_weights[i];
         uint k = assigns[block_offset + i];
-        uint lk = (k >= task_first_cent && k < task_first_cent + task_nr_cents)
-                  ? (k - task_first_cent) : task_nr_cents;
-        local_sums[lk * S + subj_idx] += val;
+        uint local_k = (k >= task_first_cent && k < task_first_cent + task_nr_cents) ? (k - task_first_cent) : task_nr_cents;
+        local_sums[local_k * S + subj_idx] += val;
       }
     }
   }
 
-  // Reduce OMP thread-local arrays into mpi_recv_buf - each thread owns a slice of clusters.
-  // Counts go to mpi_recv_buf[task_nr_cents*S .. task_nr_cents*S+task_nr_cents] and sums go to mpi_recv_buf[0 .. task_nr_cents*S].
+  // Reduce per-thread sums and counts into a contiguous MPI buffer
   #pragma omp for
   for (uint k = 0; k < task_nr_cents; k++) {
     double sum_count = 0.0;
@@ -225,28 +218,23 @@ void update_step(const double* __restrict__ docs, double* __restrict__ centroids
 
   #pragma omp single
   {
-    // Append changed_count at the end of the buffer so it gets reduced together with sums and counts
+    // Appended changed_count at the end of the buffer so it gets reduced together with sums and counts
     mpi_recv_buf[task_nr_cents * S + task_nr_cents] = (double)changed_count;
 
-    double t_comm = -MPI_Wtime();
-
-    MPI_Allreduce(MPI_IN_PLACE, mpi_recv_buf,
-                  (int)(task_nr_cents * S + task_nr_cents + 1),
-                  MPI_DOUBLE, MPI_SUM, g.col_comm); 
+    MPI_Allreduce(MPI_IN_PLACE, mpi_recv_buf, (int)(task_nr_cents * S + task_nr_cents + 1), MPI_DOUBLE, MPI_SUM, g.col_comm);
 
     double global_changed = mpi_recv_buf[task_nr_cents * S + task_nr_cents];
+
+    // Broadcast convergence flag to all processes in that row
     MPI_Bcast(&global_changed, 1, MPI_DOUBLE, 0, g.row_comm);
 
-    t_comm += MPI_Wtime();
-
-    total_comm_time += t_comm;
     changed = (global_changed != 0.0);
   }
 
   // Verify convergence
   if (!changed) return;
 
-  // Compute centroids using recv_buf global
+  // Compute centroids using mpi_recv_buf global
   #pragma omp for
   for (uint k = 0; k < task_nr_cents; k++) {
     double count = mpi_recv_buf[task_nr_cents * S + k];
@@ -267,100 +255,135 @@ void reassign_step(const double* __restrict__ docs, const double* __restrict__ c
                    uint task_first_cent, DistIdx* __restrict__ local_pairs,
                    uint& changed_count, const Grid& g) {
 
-  assert(svcntd() >= BLOCK_SIZE && "SVE vector width < 512 bits; incompatível com BLOCK_SIZE=8");
+  assert(svcntd() >= BLOCK_SIZE && "SVE vector width < 512 bits;");
 
-  const svbool_t pg_8 = svwhilelt_b64((uint64_t)0, (uint64_t)BLOCK_SIZE);
+  // Predicate mask for BLOCK_SIZE lanes (8 doubles in this block)
+  const svbool_t pred_mask = svwhilelt_b64((uint64_t)0, (uint64_t)BLOCK_SIZE);
 
   #pragma omp for
   for (uint block_idx = 0; block_idx < D_padded; block_idx += BLOCK_SIZE) {
     size_t block_start = (block_idx / BLOCK_SIZE) * (S * BLOCK_SIZE);
 
-    svfloat64_t min_dist     = svdup_n_f64(std::numeric_limits<double>::max());
+    // Keep track of minimum distances and best cluster indices
+    // Initialize minimum distances to +inf and cluster indices to 0
+    svfloat64_t min_dist = svdup_n_f64(std::numeric_limits<double>::max());
     svfloat64_t best_cluster = svdup_n_f64(0.0);
 
+    // Avoids remainder loop since C is padded
     for (uint c = 0; c < C_padded_local; c += 4) {
       svfloat64_t d0 = svdup_n_f64(0.0), d1 = svdup_n_f64(0.0);
       svfloat64_t d2 = svdup_n_f64(0.0), d3 = svdup_n_f64(0.0);
 
       for (uint s = 0; s < S; ++s) {
-        svfloat64_t doc = svld1_f64(pg_8, &docs[block_start + s * BLOCK_SIZE]);
+
+        // Load BLOCK_SIZE document values
+        svfloat64_t doc = svld1_f64(pred_mask, &docs[block_start + s * BLOCK_SIZE]);
+
+        // For each dimension we accumulate the squared distances
+        // svdup -> broadcast centroid value
+        // svmla -> fused multiply-add: d += diff * diff
 
         svfloat64_t cent0 = svdup_n_f64(centroids[(c + 0) * S + s]);
-        svfloat64_t diff0 = svsub_f64_x(pg_8, doc, cent0);
-        d0 = svmla_f64_x(pg_8, d0, diff0, diff0);
+        svfloat64_t diff0 = svsub_f64_x(pred_mask, doc, cent0);
+        d0 = svmla_f64_x(pred_mask, d0, diff0, diff0);
 
         svfloat64_t cent1 = svdup_n_f64(centroids[(c + 1) * S + s]);
-        svfloat64_t diff1 = svsub_f64_x(pg_8, doc, cent1);
-        d1 = svmla_f64_x(pg_8, d1, diff1, diff1);
+        svfloat64_t diff1 = svsub_f64_x(pred_mask, doc, cent1);
+        d1 = svmla_f64_x(pred_mask, d1, diff1, diff1);
 
         svfloat64_t cent2 = svdup_n_f64(centroids[(c + 2) * S + s]);
-        svfloat64_t diff2 = svsub_f64_x(pg_8, doc, cent2);
-        d2 = svmla_f64_x(pg_8, d2, diff2, diff2);
+        svfloat64_t diff2 = svsub_f64_x(pred_mask, doc, cent2);
+        d2 = svmla_f64_x(pred_mask, d2, diff2, diff2);
 
         svfloat64_t cent3 = svdup_n_f64(centroids[(c + 3) * S + s]);
-        svfloat64_t diff3 = svsub_f64_x(pg_8, doc, cent3);
-        d3 = svmla_f64_x(pg_8, d3, diff3, diff3);
+        svfloat64_t diff3 = svsub_f64_x(pred_mask, doc, cent3);
+        d3 = svmla_f64_x(pred_mask, d3, diff3, diff3);
       }
+
+      // Efficient argmin with SIMD: https://en.algorithmica.org/hpc/algorithms/argmin/
+      // Adapted to SVE:
+      // - Uses predicate-based comparisons (svcmplt) and selection (svsel)
+      // - A single SVE vector handles all lanes
+
+      // We have 8 distances and must find the argmin.
+      // 1. Compare pairs: (d0 vs d1) and (d2 vs d3)
+      // 2. Select element-wise minima and corresponding indices
+      // 3. Compare intermediate results to obtain the final minimum
+
+      // This is implemented as a tree ("tournament") reduction: ((d0 < d1) < (d2 < d3))
 
       svfloat64_t idx0 = svdup_n_f64(static_cast<double>(task_first_cent + c + 0));
       svfloat64_t idx1 = svdup_n_f64(static_cast<double>(task_first_cent + c + 1));
       svfloat64_t idx2 = svdup_n_f64(static_cast<double>(task_first_cent + c + 2));
       svfloat64_t idx3 = svdup_n_f64(static_cast<double>(task_first_cent + c + 3));
 
-      svbool_t    cmp10  = svcmplt_f64(pg_8, d1, d0);
-      svfloat64_t min01  = svmin_f64_x(pg_8, d0, d1);
-      svfloat64_t idx01  = svsel_f64(cmp10, idx1, idx0);
+      svbool_t cmp10 = svcmplt_f64(pred_mask, d1, d0);
+      svfloat64_t min01 = svmin_f64_x(pred_mask, d0, d1);
+      svfloat64_t idx01 = svsel_f64(cmp10, idx1, idx0);
 
-      svbool_t    cmp32  = svcmplt_f64(pg_8, d3, d2);
-      svfloat64_t min23  = svmin_f64_x(pg_8, d2, d3);
-      svfloat64_t idx23  = svsel_f64(cmp32, idx3, idx2);
+      svbool_t cmp32 = svcmplt_f64(pred_mask, d3, d2);
+      svfloat64_t min23 = svmin_f64_x(pred_mask, d2, d3);
+      svfloat64_t idx23 = svsel_f64(cmp32, idx3, idx2);
 
-      svbool_t    cmp0123   = svcmplt_f64(pg_8, min23, min01);
-      svfloat64_t local_min = svmin_f64_x(pg_8, min01, min23);
+      svbool_t cmp0123 = svcmplt_f64(pred_mask, min23, min01);
+      svfloat64_t local_min = svmin_f64_x(pred_mask, min01, min23);
       svfloat64_t local_idx = svsel_f64(cmp0123, idx23, idx01);
 
-      svbool_t global_cmp = svcmplt_f64(pg_8, local_min, min_dist);
-      min_dist     = svmin_f64_x(pg_8, min_dist, local_min);
+      // Update global minimum distance and cluster index
+      // Compare current best with new candidates
+      svbool_t global_cmp = svcmplt_f64(pred_mask, local_min, min_dist);
+      min_dist = svmin_f64_x(pred_mask, min_dist, local_min);
       best_cluster = svsel_f64(global_cmp, local_idx, best_cluster);
     }
 
     alignas(ALIGN) double dists[BLOCK_SIZE];
     alignas(ALIGN) double idxs[BLOCK_SIZE];
-    svst1_f64(pg_8, dists, min_dist);
-    svst1_f64(pg_8, idxs,  best_cluster);
 
-    for (uint i = 0; i < BLOCK_SIZE; i++)
+    // Store results into scalar arrays
+    // Needed because MPI_MINLOC works on scalar pairs
+    svst1_f64(pred_mask, dists, min_dist);
+    svst1_f64(pred_mask, idxs, best_cluster);
+
+    for (uint i = 0; i < BLOCK_SIZE; i++) {
       local_pairs[block_idx + i] = { dists[i], (int)idxs[i] };
+    }
   }
 
+  // Global reduction across processes (row communicator)
+  // MPI_MINLOC selects (min distance, corresponding cluster index)
   #pragma omp single
   {
-    MPI_Allreduce(MPI_IN_PLACE, local_pairs, (int)D_padded,
-                  MPI_DOUBLE_INT, MPI_MINLOC, g.row_comm);
+    MPI_Allreduce(MPI_IN_PLACE, local_pairs, (int)D_padded, MPI_DOUBLE_INT, MPI_MINLOC, g.row_comm);
   }
 
   #pragma omp for reduction(|:changed_count)
   for (uint block_idx = 0; block_idx < D_padded; block_idx += BLOCK_SIZE) {
-    uint valid_docs = (uint)std::min(
-        (int)BLOCK_SIZE,
-        std::max(0, (int)task_nr_docs - (int)block_idx));
 
-    // b32 para predicar loads/stores de uint (32 bits)
-    svbool_t pg_valid = svwhilelt_b32((uint32_t)0, (uint32_t)valid_docs);
+    // Determine number of valid documents in this block (last block may be smaller)
+    uint valid_docs = (uint)std::min((int)BLOCK_SIZE, std::max(0, (int)task_nr_docs - (int)block_idx));
 
+    // Create SVE predicate for valid lanes
+    svbool_t pred_valid = svwhilelt_b32((uint32_t)0, (uint32_t)valid_docs);
+
+    // Extract new cluster IDs from local_pairs 
     alignas(ALIGN) uint new_ids[BLOCK_SIZE];
-    for (uint i = 0; i < BLOCK_SIZE; i++)
+    for (uint i = 0; i < BLOCK_SIZE; i++) {
       new_ids[i] = (uint)local_pairs[block_idx + i].idx;
+    }
 
-    svuint32_t new_idx = svld1_u32(pg_valid, new_ids);
-    svuint32_t old_idx = svld1_u32(pg_valid, &assigns[block_idx]);
+    svuint32_t new_idx = svld1_u32(pred_valid, new_ids);
+    svuint32_t old_idx = svld1_u32(pred_valid, &assigns[block_idx]);
 
-    svbool_t eq_mask      = svcmpeq_u32(pg_valid, new_idx, old_idx);
-    svbool_t changed_mask = svbic_b_z(pg_valid, pg_valid, eq_mask);
+    // Compare new vs old assignments
+    svbool_t eq_mask = svcmpeq_u32(pred_valid, new_idx, old_idx);
 
-    if (svptest_any(pg_valid, changed_mask)) {
+    // Compute mask of lanes that changed
+    svbool_t changed_mask = svbic_b_z(pred_valid, pred_valid, eq_mask);
+
+    // If any assignments changed, mark changed_count and update
+    if (svptest_any(pred_valid, changed_mask)) {
       changed_count |= 1;
-      svst1_u32(pg_valid, &assigns[block_idx], new_idx);
+      svst1_u32(pred_valid, &assigns[block_idx], new_idx);
     }
   }
 }
@@ -387,6 +410,7 @@ int main(int argc, char** argv) {
 
   Grid g;
   try {
+    // Processes organized in a grid
     g = make_grid(num_procs, id);
   }
   catch (const std::exception& e) {
@@ -418,7 +442,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  uint D_padded       = (task_nr_docs  + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE;
+  uint D_padded = (task_nr_docs  + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE;
 
   // Pad C_local to the next multiple of 4 so reassign_step has no remainder loop.
   // Ghost centroids are filled with a large (but finite) value so they are
@@ -428,16 +452,14 @@ int main(int argc, char** argv) {
   // omp_get_max_threads since we are still not in omp parallel
   int number_threads = omp_get_max_threads();
 
-  // Allocate C_padded_local slots; initialise ghost centroids to +inf/2
+  // Allocate C_padded_local slots and initialise ghost centroids to +inf/2
   AlignedPtr<double> centroids = make_aligned<double>(C_padded_local * S);
   std::fill_n(centroids.get(), C_padded_local * S, 0.0);
   if (C_padded_local > task_nr_cents)
-    std::fill_n(centroids.get() + task_nr_cents * S,
-                (C_padded_local - task_nr_cents) * S,
-                std::numeric_limits<double>::max() / 2.0);
+    std::fill_n(centroids.get() + task_nr_cents * S, (C_padded_local - task_nr_cents) * S, std::numeric_limits<double>::max() / 2.0);
 
-  AlignedPtr<double> all_sums   = make_aligned<double>((size_t)number_threads * (task_nr_cents + 1) * S);
-  AlignedPtr<uint>   all_counts = make_aligned<uint>  ((size_t)number_threads * (task_nr_cents + 1));
+  AlignedPtr<double> all_sums = make_aligned<double>((size_t)number_threads * (task_nr_cents + 1) * S);
+  AlignedPtr<uint> all_counts = make_aligned<uint>  ((size_t)number_threads * (task_nr_cents + 1));
 
   uint changed_count = 1;
   bool changed = true;
@@ -452,10 +474,9 @@ int main(int argc, char** argv) {
   DistIdx* local_pairs = static_cast<DistIdx*>(pairs_raw);
 
   const double INF_VAL = std::numeric_limits<double>::max();
-  for (uint d = 0; d < D_padded; d++)
+  for (uint d = 0; d < D_padded; d++) {
     local_pairs[d] = { INF_VAL, (int)C };
-
-  double total_comm_time = 0.0;
+  }
 
   MPI_Barrier(MPI_COMM_WORLD);
   double exec_time = -MPI_Wtime();
@@ -469,23 +490,18 @@ int main(int argc, char** argv) {
     #pragma omp single
     for (uint d = task_nr_docs; d < D_padded; d++) assignments[d] = C; // ghost cluster
 
-    update_step(docs.get(), centroids.get(), assignments.get(),
-                S, task_nr_docs, task_nr_cents, task_first_cent,
-                all_sums.get(), all_counts.get(), number_threads,
-                mpi_recv_buf.get(), changed_count, changed, total_comm_time, g);
+    update_step(docs.get(), centroids.get(), assignments.get(), S, task_nr_docs, task_nr_cents, task_first_cent,
+                all_sums.get(), all_counts.get(), number_threads, mpi_recv_buf.get(), changed_count, changed, g);
 
     while (changed) {
       #pragma omp single
       changed_count = 0;
 
-      reassign_step(docs.get(), centroids.get(), assignments.get(),
-                    C_padded_local, task_nr_docs, D_padded, S,
+      reassign_step(docs.get(), centroids.get(), assignments.get(), C_padded_local, task_nr_docs, D_padded, S,
                     task_first_cent, local_pairs, changed_count, g);
 
-      update_step(docs.get(), centroids.get(), assignments.get(),
-                  S, task_nr_docs, task_nr_cents, task_first_cent,
-                  all_sums.get(), all_counts.get(), number_threads,
-                  mpi_recv_buf.get(), changed_count, changed, total_comm_time, g);
+      update_step(docs.get(), centroids.get(), assignments.get(), S, task_nr_docs, task_nr_cents, task_first_cent,
+                  all_sums.get(), all_counts.get(), number_threads, mpi_recv_buf.get(), changed_count, changed, g);
     }
   }
 
@@ -494,14 +510,6 @@ int main(int argc, char** argv) {
   t_gather += MPI_Wtime();
 
   exec_time += MPI_Wtime();
-
-  if (!id) {
-    std::cerr << std::fixed << std::setprecision(6)
-              << "Total time: " << exec_time << "s\n"
-              << "Allreduce time: " << total_comm_time << "s\n"
-              << "Gather time: " << t_gather << "s\n"
-              << "Computation time: " << exec_time - total_comm_time - t_gather << "s\n";
-  }
 
   if (!id) {
     std::cerr << std::fixed << std::setprecision(1) << exec_time << "s\n";
