@@ -10,9 +10,9 @@
 #include <cmath>
 #include <cassert>
 
-
-// Hardcoded for working with 8 doubles -> 2 256-bit avx2 registers
-// Also useful since one block fills a unique cache line
+// NOTE: SVE is agnostic to register width. We use a block of 8 doubles
+// which fit nicely in a 512-bit wide SVE register. 
+// This value is also optimal as it perfectly fills a single cache line
 #define BLOCK_SIZE 8
 #define ALIGN 32
 
@@ -511,7 +511,6 @@ int main(int argc, char** argv) {
     print_result(all_assigns.get(), D);
   }
 
-  // All allocated memory will be cleaned up by RAII
   std::free(pairs_raw);
   MPI_Comm_free(&g.row_comm);
   MPI_Comm_free(&g.col_comm);
